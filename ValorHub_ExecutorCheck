@@ -1,0 +1,1147 @@
+--[[
+    VALOR EXECUTOR CHECK
+    An overall executor test, like UNC / sUNC: every function scripts commonly
+    use is checked by actually USING it, not just by name (the full UNC list,
+    the newer sUNC-style ones, and common extras like firetouchinterest).
+    Then extra checks: game modules, thread rules, file safety, speed.
+
+    Run it inside a game (one built on Knit, like Volleyball Legends, tests
+    the most). Results: a window (click a row to read its full message;
+    "Problems only" hides what passed) and valor_check.txt in the workspace.
+    Nothing is printed: some games upload their console.
+
+    Safe to run: it never clicks, types, changes your clipboard, FPS cap or
+    teleport queue, never opens a console or message box, never hooks the
+    game, never connects anywhere but GitHub. Those functions are only
+    checked for presence ("SKIP").
+]]
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local RF = game:GetService("ReplicatedFirst")
+local UIS = game:GetService("UserInputService")
+local LP = Players.LocalPlayer
+
+local ENV = getfenv(1)
+-- "crypt.base64encode" -> the function, or nil
+local function resolve(path)
+    local cur = ENV
+    for part in string.gmatch(path, "[^%.]+") do
+        local ok, v = pcall(function() return cur[part] end)
+        if not ok or v == nil then return nil end
+        cur = v
+    end
+    return cur
+end
+
+-- ===================================================================
+--  test runner
+-- ===================================================================
+-- status: PASS (works) / ALIAS (works under another name) / FAIL (there,
+-- but wrong or erroring) / MISSING / SKIP (there, not run on purpose) /
+-- INFO (a fact, not a pass or fail) / WARN (works, but risky)
+local groups, current = {}, nil
+local function group(name, isExtra)
+    current = {name = name, extra = isExtra, items = {}}
+    table.insert(groups, current)
+end
+
+-- run fn(f) on its own thread, give it `secs` at most
+local function runTimed(fn, f, secs)
+    local done, ok, a, b = false, false, nil, nil
+    task.spawn(function()
+        ok, a, b = pcall(fn, f)
+        done = true
+    end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < (secs or 4) do task.wait() end
+    if not done then return false, "timed out after " .. (secs or 4) .. "s" end
+    if not ok then return false, tostring(a) end
+    if a == false then return false, tostring(b or "wrong result") end
+    return true, (a ~= true and a ~= nil) and tostring(a) or nil
+end
+
+-- test("name", {aliases}, fn) -- fn gets the function, returns true /
+-- a detail string / false + why; errors count as FAIL. fn == "skip" only
+-- checks presence.
+local function test(name, aliases, fn, secs)
+    local item = {name = name}
+    table.insert(current.items, item)
+    local f, used = resolve(name), name
+    if f == nil then
+        for _, a in ipairs(aliases or {}) do
+            f = resolve(a)
+            if f ~= nil then used = a; break end
+        end
+    end
+    if f == nil then
+        item.status, item.detail = "MISSING", "not found" .. ((aliases and #aliases > 0) and (" (also tried " .. table.concat(aliases, ", ") .. ")") or "")
+        return
+    end
+    local aliasNote = used ~= name and ("as " .. used) or nil
+    if fn == "skip" then
+        item.status, item.detail = "SKIP", "present" .. (aliasNote and (" " .. aliasNote) or "") .. " - not run (it would act on your game or PC)"
+        return
+    end
+    if not fn then
+        item.status, item.detail = aliasNote and "ALIAS" or "PASS", aliasNote or "present"
+        return
+    end
+    local ok, detail = runTimed(fn, f, secs)
+    if ok then
+        item.status = aliasNote and "ALIAS" or "PASS"
+        item.detail = (aliasNote and (aliasNote .. (detail and " - " or "")) or "") .. (detail or "")
+        if item.detail == "" then item.detail = "works" end
+    else
+        item.status, item.detail = "FAIL", (aliasNote and (aliasNote .. ": ") or "") .. detail
+    end
+end
+
+-- extras: fn returns status, detail
+local function extra(name, fn, secs)
+    local item = {name = name}
+    table.insert(current.items, item)
+    local done, s, d = false, nil, nil
+    task.spawn(function()
+        local ok, a, b = pcall(fn)
+        if ok then s, d = a, b else s, d = "FAIL", tostring(a) end
+        done = true
+    end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < (secs or 5) do task.wait() end
+    if not done then s, d = "FAIL", "timed out" end
+    item.status, item.detail = s or "INFO", d or ""
+end
+
+-- check("name", fn): a function test that isn't one function's name (fn
+-- returns like a test's, or "MISSING", why)
+local function check(name, fn, secs)
+    local item = {name = name}
+    table.insert(current.items, item)
+    local ok, detail = runTimed(fn, nil, secs)
+    if ok and detail == "MISSING" then
+        item.status, item.detail = "MISSING", "not found"
+        return
+    end
+    item.status = ok and "PASS" or "FAIL"
+    item.detail = ok and (detail or "works") or detail
+end
+
+local function G(name) return resolve(name) end
+local DIR = ".valor_check"
+
+-- ===================================================================
+--  CLOSURES
+-- ===================================================================
+group("Closures")
+test("checkcaller", nil, function(f) return f() or false, "should be true when called from your own script" end)
+test("clonefunction", nil, function(f)
+    local function a() return "valor" end
+    local b = f(a)
+    if a == b then return false, "returned the same function" end
+    return b() == "valor" or false, "the clone doesn't behave like the original"
+end)
+test("hookfunction", {"replaceclosure"}, function(f)
+    local function target() return "original" end
+    local old = f(target, function() return "hooked" end)
+    if target() ~= "hooked" then return false, "the hook didn't take" end
+    return (type(old) == "function" and old() == "original") or false, "the returned original doesn't work"
+end)
+check("hookfunction (C function)", function()
+    local hf, ncc = G("hookfunction") or G("replaceclosure"), G("newcclosure")
+    if not (hf and ncc) then return "MISSING", "needs hookfunction + newcclosure" end
+    local c = ncc(function() return "original" end)
+    local old = hf(c, function() return "hooked" end)
+    return (c() == "hooked" and old() == "original") or false, "couldn't hook a C function"
+end)
+test("restorefunction", nil, function(f)
+    local hf = G("hookfunction") or G("replaceclosure")
+    if not hf then return true, "present (no hookfunction to test with)" end
+    local function target() return "original" end
+    hf(target, function() return "hooked" end)
+    f(target)
+    return target() == "original" or false, "the hook is still there"
+end)
+test("iscclosure", nil, function(f)
+    return (f(print) == true and f(function() end) == false) or false, "print should be a C closure, a Lua function shouldn't"
+end)
+test("islclosure", nil, function(f)
+    return (f(function() end) == true and f(print) == false) or false, "a Lua function should be an L closure, print shouldn't"
+end)
+test("isexecutorclosure", {"checkclosure", "isourclosure"}, function(f)
+    if f(print) then return false, "print counted as an executor function" end
+    return f(function() end) or false, "your own script's function didn't count"
+end)
+test("newcclosure", nil, function(f)
+    local function a() return "valor" end
+    local c = f(a)
+    if c == a or c() ~= "valor" then return false, "wrapped function misbehaves" end
+    local isc = G("iscclosure")
+    if isc and not isc(c) then return false, "result isn't a C closure" end
+    return true
+end)
+test("newlclosure", nil, function(f)
+    local l = f(print)
+    if type(l) ~= "function" or l == print then return false, "didn't wrap print" end
+    local isl = G("islclosure")
+    if isl and not isl(l) then return false, "result isn't a Lua closure" end
+    return true
+end)
+test("getfunctionhash", nil, function(f)
+    local a = f(function() return 1 end)
+    local b = f(function() return 2 end)
+    if type(a) ~= "string" or #a == 0 then return false, "no hash" end
+    return a ~= b or false, "two different functions got the same hash"
+end)
+test("loadstring", nil, function(f)
+    local fn = f("return ... + 1")
+    if type(fn) ~= "function" or fn(1) ~= 2 then return false, "a simple chunk didn't run" end
+    local ok, bad, err = pcall(f, "this is not lua")
+    if ok and bad == nil and type(err) == "string" then return true end
+    return true, "works (a syntax error raised instead of returning nil, err)"
+end)
+
+-- ===================================================================
+--  ENCODING & CRYPT
+-- ===================================================================
+group("Encoding & crypt")
+test("crypt.base64encode", {"base64encode", "crypt.base64.encode", "crypt.base64_encode", "base64.encode", "base64_encode"}, function(f)
+    return f("test") == "dGVzdA==" or false, "\"test\" didn't encode to dGVzdA=="
+end)
+test("crypt.base64decode", {"base64decode", "crypt.base64.decode", "crypt.base64_decode", "base64.decode", "base64_decode"}, function(f)
+    return f("dGVzdA==") == "test" or false, "dGVzdA== didn't decode to \"test\""
+end)
+test("crypt.encrypt", nil, function(f)
+    local gk, dec = G("crypt.generatekey"), G("crypt.decrypt")
+    if not (gk and dec) then return true, "present (needs generatekey + decrypt to test)" end
+    local key = gk()
+    local data, iv = f("valor", key, nil, "CBC")
+    return dec(data, key, iv, "CBC") == "valor" or false, "encrypt -> decrypt didn't give the text back"
+end)
+test("crypt.decrypt", nil, function(f)
+    local gk, enc = G("crypt.generatekey"), G("crypt.encrypt")
+    if not (gk and enc) then return true, "present (needs generatekey + encrypt to test)" end
+    local key = gk()
+    local data, iv = enc("valor", key, nil, "CBC")
+    return f(data, key, iv, "CBC") == "valor" or false, "didn't decrypt its own output"
+end)
+test("crypt.generatebytes", nil, function(f)
+    local b = f(16)
+    local dec = G("crypt.base64decode") or G("base64decode")
+    if dec then return #dec(b) == 16 or false, "16 bytes asked, " .. #dec(b) .. " returned" end
+    return type(b) == "string" or false, "didn't return a string"
+end)
+test("crypt.generatekey", nil, function(f)
+    local k = f()
+    local dec = G("crypt.base64decode") or G("base64decode")
+    if dec then return #dec(k) == 32 or false, "key should be 32 bytes, got " .. #dec(k) end
+    return type(k) == "string" or false, "didn't return a string"
+end)
+test("crypt.hash", nil, function(f)
+    local h = f("test", "sha256")
+    if type(h) ~= "string" then return false, "didn't return a string" end
+    return h:lower() == "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" or false, "sha256(\"test\") is wrong"
+end)
+test("lz4compress", nil, function(f)
+    local raw = "valor valor valor valor valor valor"
+    local de = G("lz4decompress")
+    if not de then return type(f(raw)) == "string" or false, "didn't return a string" end
+    return de(f(raw), #raw) == raw or false, "compress -> decompress didn't round-trip"
+end)
+test("lz4decompress", nil, function(f)
+    local co = G("lz4compress")
+    if not co then return true, "present (no lz4compress to test with)" end
+    local raw = "valor valor valor valor"
+    return f(co(raw), #raw) == raw or false, "didn't decompress its own output"
+end)
+
+-- ===================================================================
+--  ENVIRONMENT & MEMORY
+-- ===================================================================
+group("Environment & memory")
+test("getgenv", nil, function(f)
+    f().__valor_genv = "ok"
+    local seen = __valor_genv
+    f().__valor_genv = nil
+    return seen == "ok" or false, "a getgenv() global isn't visible as a plain global"
+end)
+test("getrenv", nil, function(f)
+    local r = f()
+    if type(r) ~= "table" then return false, "not a table" end
+    return (r._G ~= _G and r.game == game) or false, "should be the GAME's environment, separate from the executor's"
+end)
+test("getgc", nil, function(f)
+    local gc = f()
+    if type(gc) ~= "table" or #gc == 0 then return false, "empty" end
+    local withTables = f(true)
+    local hasTable = false
+    for _, v in ipairs(withTables) do if type(v) == "table" then hasTable = true; break end end
+    return hasTable and (#gc .. " items") or (#gc .. " items, but getgc(true) gave no tables")
+end)
+local function valor_marker_fn() return "marker" end
+test("filtergc", nil, function(f)
+    local hit = f("function", {Name = "valor_marker_fn", IgnoreExecutor = false}, true)
+    return hit == valor_marker_fn or false, "didn't find a named function"
+end)
+test("getreg", nil, function(f)
+    local r = f()
+    return (type(r) == "table" and next(r) ~= nil) or false, "empty"
+end)
+test("getinstances", nil, function(f)
+    local list = f()
+    return (type(list) == "table" and typeof(list[1]) == "Instance") or false, "no instances"
+end)
+test("getnilinstances", nil, function(f)
+    local mine = Instance.new("Part")
+    mine.Name = "valor_nil_probe"
+    for _, inst in ipairs(f()) do if inst == mine then return true end end
+    return false, "a part with no parent wasn't in the list"
+end)
+test("getloadedmodules", nil, function(f)
+    local list = f()
+    if type(list) ~= "table" then return false, "not a table" end
+    return #list .. " modules"
+end)
+test("getrunningscripts", nil, function(f)
+    local list = f()
+    return (type(list) == "table" and #list > 0) or false, "no running scripts"
+end)
+test("getscripts", nil, function(f)
+    local list = f()
+    return (type(list) == "table" and #list > 0) or false, "no scripts"
+end)
+
+-- ===================================================================
+--  SCRIPTS
+-- ===================================================================
+group("Scripts")
+local function someLocalScript()
+    local c = LP.Character
+    local s = c and c:FindFirstChild("Animate")
+    if s and s:IsA("LocalScript") then return s end
+    local ps = LP:FindFirstChild("PlayerScripts")
+    return ps and ps:FindFirstChildWhichIsA("LocalScript", true)
+end
+test("getsenv", nil, function(f)
+    local s = someLocalScript()
+    if not s then return true, "no LocalScript to try it on" end
+    local env = f(s)
+    return (type(env) == "table" and env.script == s) or false, "wrong environment for " .. s.Name
+end)
+test("getscriptclosure", {"getscriptfunction"}, function(f)
+    local s = someLocalScript()
+    if not s then return true, "no LocalScript to try it on" end
+    return type(f(s)) == "function" or false, "no function for " .. s.Name
+end)
+test("getscriptbytecode", {"dumpstring"}, function(f)
+    local s = someLocalScript()
+    if not s then return true, "no LocalScript to try it on" end
+    local b = f(s)
+    return (type(b) == "string" and #b > 0) or false, "no bytecode for " .. s.Name
+end)
+test("getscripthash", nil, function(f)
+    local s = someLocalScript()
+    if not s then return true, "no LocalScript to try it on" end
+    local h = f(s)
+    return (type(h) == "string" and #h > 0) or false, "no hash"
+end)
+test("getcallingscript", nil, function(f) local s = f(); return true, "returned " .. typeof(s) end)
+test("decompile", nil, function(f)
+    local s = someLocalScript()
+    if not s then return true, "no LocalScript to try it on" end
+    local src = f(s)
+    return (type(src) == "string" and #src > 0) or false, "no source for " .. s.Name
+end, 10)
+test("saveinstance", nil, "skip")
+
+-- ===================================================================
+--  DEBUG
+-- ===================================================================
+group("Debug")
+test("debug.getconstant", nil, function(f)
+    local function a() print("valor constant") end
+    for i = 1, 4 do if f(a, i) == "valor constant" then return true end end
+    return false, "didn't find a string constant"
+end)
+test("debug.getconstants", nil, function(f)
+    local function a() print("valor constants", 777) end
+    local seen = {}
+    for _, v in pairs(f(a)) do seen[v] = true end
+    return (seen["valor constants"] and seen.print) or false, "constants missing from the list"
+end)
+test("debug.setconstant", nil, function(f)
+    local function a() return "fail" end
+    f(a, 1, "success")
+    return a() == "success" or false, "the constant didn't change"
+end)
+test("debug.getinfo", nil, function(f)
+    local info = f(print)
+    return (type(info) == "table" and (info.func ~= nil or info.source ~= nil)) or false, "no info table"
+end)
+test("debug.getproto", nil, function(f)
+    local function a() local function inner() return "proto" end return inner end
+    local p = f(a, 1, true)
+    if type(p) == "table" then p = p[1] end
+    if type(p) == "function" and pcall(p) then return true end
+    return type(f(a, 1)) == "function" or false, "didn't return the inner function"
+end)
+test("debug.getprotos", nil, function(f)
+    local function a()
+        local function x() end
+        local function y() end
+        local function z() end
+        return x, y, z
+    end
+    local n = #f(a)
+    return n == 3 or false, "expected 3 inner functions, got " .. n
+end)
+test("debug.getstack", nil, function(f)
+    local _ = "valor" .. "stack"
+    return type(f(1)) == "table" or false, "didn't return the stack"
+end)
+test("debug.setstack", nil, function(f)
+    local function a()
+        local value = 50;
+        (function() f(2, 1, 100) end)()
+        return value
+    end
+    return a() == 100 or false, "the stack value didn't change"
+end)
+test("debug.getupvalue", nil, function(f)
+    local up = function() end
+    local function a() return up end
+    return f(a, 1) == up or false, "upvalue 1 is wrong"
+end)
+test("debug.getupvalues", nil, function(f)
+    local up = function() end
+    local function a() return up end
+    return f(a)[1] == up or false, "upvalue list is wrong"
+end)
+test("debug.setupvalue", nil, function(f)
+    local function up() return "fail" end
+    local function a() return up() end
+    f(a, 1, function() return "success" end)
+    return a() == "success" or false, "the upvalue didn't change"
+end)
+
+-- ===================================================================
+--  METATABLE
+-- ===================================================================
+group("Metatable")
+test("getrawmetatable", nil, function(f)
+    local mt = {__metatable = "Locked!"}
+    if f(setmetatable({}, mt)) ~= mt then return false, "didn't get past __metatable" end
+    local gmt = f(game)
+    return (type(gmt) == "table" and gmt.__index ~= nil) or false, "can't read game's metatable"
+end)
+test("setrawmetatable", nil, function(f)
+    local obj = setmetatable({}, {__index = function() return false end, __metatable = "Locked!"})
+    f(obj, {__index = function() return true end})
+    return obj.anything == true or false, "the new metatable didn't apply"
+end)
+test("hookmetamethod", nil, function(f)
+    local obj = setmetatable({}, {__index = function() return false end, __metatable = "Locked!"})
+    local old = f(obj, "__index", function() return true end)
+    if obj.anything ~= true then return false, "the hook didn't take" end
+    return type(old) == "function" or false, "didn't return the original"
+end)
+test("getnamecallmethod", nil, "skip")
+test("isreadonly", nil, function(f)
+    local t = {}
+    table.freeze(t)
+    return f(t) == true or false, "a frozen table should be read-only"
+end)
+test("setreadonly", nil, function(f)
+    local t = {v = true}
+    table.freeze(t)
+    f(t, false)
+    t.v = false
+    return t.v == false or false, "couldn't write after setreadonly(t, false)"
+end)
+
+-- ===================================================================
+--  INSTANCES & REFLECTION
+-- ===================================================================
+group("Instances & reflection")
+test("cloneref", nil, function(f)
+    local part = Instance.new("Part")
+    local clone = f(part)
+    if part == clone then return false, "the clone is the same reference" end
+    clone.Name = "valor_cloneref"
+    return part.Name == "valor_cloneref" or false, "the clone doesn't point at the same part"
+end)
+test("compareinstances", nil, function(f)
+    local part = Instance.new("Part")
+    local cr = G("cloneref")
+    if not cr then return f(part, part) or false, "a part should equal itself" end
+    return f(part, cr(part)) or false, "a part and its cloneref should compare equal"
+end)
+test("gethui", {"get_hidden_gui"}, function(f) return typeof(f()) == "Instance" or false, "didn't return a container" end)
+test("getcallbackvalue", nil, function(f)
+    local bf = Instance.new("BindableFunction")
+    local cb = function() end
+    bf.OnInvoke = cb
+    return f(bf, "OnInvoke") == cb or false, "didn't return the callback"
+end)
+test("gethiddenproperty", nil, function(f)
+    local v, hidden = f(Instance.new("Fire"), "size_xml")
+    return (v == 5 and hidden == true) or false, "Fire.size_xml should read 5 (hidden)"
+end)
+test("sethiddenproperty", nil, function(f)
+    local fire = Instance.new("Fire")
+    f(fire, "size_xml", 10)
+    local get = G("gethiddenproperty")
+    return (not get) or get(fire, "size_xml") == 10 or false, "Fire.size_xml didn't change"
+end)
+test("isscriptable", nil, function(f)
+    local fire = Instance.new("Fire")
+    return (f(fire, "size_xml") == false and f(fire, "Size") == true) or false, "wrong answer for Fire.size_xml / Size"
+end)
+test("setscriptable", nil, function(f)
+    local fire = Instance.new("Fire")
+    f(fire, "size_xml", true)
+    return pcall(function() return fire.size_xml end) or false, "size_xml still can't be read"
+end)
+test("getthreadidentity", {"getidentity", "getthreadcontext"}, function(f)
+    local n = f()
+    if type(n) ~= "number" then return false, "not a number" end
+    return "level " .. n
+end)
+test("setthreadidentity", {"setidentity", "setthreadcontext"}, function(f)
+    local get = G("getthreadidentity") or G("getidentity") or G("getthreadcontext")
+    f(3)
+    return (not get) or get() == 3 or false, "identity didn't change"
+end)
+
+-- ===================================================================
+--  SIGNALS & INTERACTION
+-- ===================================================================
+group("Signals & interaction")
+test("getconnections", nil, function(f)
+    local ev = Instance.new("BindableEvent")
+    local hits = 0
+    ev.Event:Connect(function() hits = hits + 1 end)
+    local c = f(ev.Event)[1]
+    if not c then return false, "no connections found" end
+    local missing = {}
+    for _, k in ipairs({"Function", "Enabled", "Fire", "Disable", "Enable", "Disconnect"}) do
+        local ok, v = pcall(function() return c[k] end)
+        if not ok or v == nil then table.insert(missing, k) end
+    end
+    if #missing > 0 then return false, "connection objects lack: " .. table.concat(missing, ", ") end
+    c:Fire()
+    return hits == 1 or false, "connection:Fire() didn't run the function"
+end)
+test("firesignal", nil, function(f)
+    local ev = Instance.new("BindableEvent")
+    local got
+    ev.Event:Connect(function(x) got = x end)
+    f(ev.Event, "valor")
+    task.wait()
+    return got == "valor" or false, "the connected function didn't get the arguments"
+end)
+test("cansignalreplicate", nil, function(f)
+    local r = f(Instance.new("BindableEvent").Event)
+    return type(r) == "boolean" or false, "didn't return true / false"
+end)
+test("replicatesignal", nil, "skip")
+test("fireclickdetector", nil, function(f)
+    f(Instance.new("ClickDetector"), 50, "MouseHoverEnter")
+    return true
+end)
+test("firetouchinterest", nil, function(f)
+    local a = Instance.new("Part")
+    a.Anchored, a.CanCollide, a.Transparency, a.Size = true, false, 1, Vector3.new(1, 1, 1)
+    a.Position = Vector3.new(0, 4000, 0)
+    local b = a:Clone()
+    b.Position = Vector3.new(0, 4000, 6)
+    local touched = false
+    a.Touched:Connect(function(p) if p == b then touched = true end end)
+    a.Parent, b.Parent = workspace, workspace
+    local ok, err = pcall(function() f(a, b, 0); task.wait(0.1); f(a, b, 1) end)
+    task.wait(0.1)
+    a:Destroy(); b:Destroy()
+    if not ok then return false, tostring(err) end
+    return touched and "fired Touched" or "ran (Touched not seen on your side - normal for many executors)"
+end)
+test("fireproximityprompt", nil, "skip")
+
+-- ===================================================================
+--  FILESYSTEM
+-- ===================================================================
+group("Filesystem")
+local mk, isf = G("makefolder"), G("isfolder")
+pcall(function() if mk and not (isf and isf(DIR)) then mk(DIR) end end)
+test("makefolder", nil, function(f) f(DIR .. "/sub"); return (not isf) or isf(DIR .. "/sub") or false, "folder not created" end)
+test("isfolder", nil, function(f) return (f(DIR) == true and f(DIR .. "/nope") == false) or false, "wrong answer for a folder" end)
+test("writefile", nil, function(f) f(DIR .. "/a.txt", "valor"); return true end)
+test("readfile", nil, function(f) return f(DIR .. "/a.txt") == "valor" or false, "didn't read back what was written" end)
+test("appendfile", nil, function(f)
+    f(DIR .. "/a.txt", "!")
+    local rf = G("readfile")
+    return (not rf) or rf(DIR .. "/a.txt") == "valor!" or false, "text wasn't appended"
+end)
+test("isfile", nil, function(f) return (f(DIR .. "/a.txt") == true and f(DIR .. "/nope.txt") == false) or false, "wrong answer for a file" end)
+test("listfiles", nil, function(f)
+    local list = f(DIR)
+    return (type(list) == "table" and #list >= 1) or false, "the test folder looks empty"
+end)
+test("loadfile", nil, function(f)
+    local wf = G("writefile")
+    if not wf then return true, "present (no writefile to test with)" end
+    wf(DIR .. "/l.lua", "return 'valor'")
+    local fn = f(DIR .. "/l.lua")
+    return (type(fn) == "function" and fn() == "valor") or false, "didn't load the file as code"
+end)
+test("dofile", nil, function(f)
+    local wf, env = G("writefile"), G("getgenv")
+    if not (wf and env) then return true, "present (needs writefile + getgenv to test)" end
+    wf(DIR .. "/d.lua", "getgenv().__valor_dofile = true")
+    f(DIR .. "/d.lua")
+    local ok = env().__valor_dofile == true
+    env().__valor_dofile = nil
+    return ok or false, "the file didn't run"
+end)
+test("getcustomasset", {"getsynasset"}, function(f)
+    local wf = G("writefile")
+    if not wf then return true, "present (no writefile to test with)" end
+    wf(DIR .. "/asset.txt", "valor")
+    local id = f(DIR .. "/asset.txt")
+    return (type(id) == "string" and id:match("^rbxasset://") ~= nil) or false, "didn't return an rbxasset:// id"
+end)
+test("delfile", nil, function(f)
+    f(DIR .. "/a.txt")
+    return (not G("isfile")) or G("isfile")(DIR .. "/a.txt") == false or false, "the file is still there"
+end)
+test("delfolder", nil, function(f)
+    f(DIR .. "/sub")
+    return (not isf) or isf(DIR .. "/sub") == false or false, "the folder is still there"
+end)
+
+-- ===================================================================
+--  CACHE
+-- ===================================================================
+group("Cache")
+test("cache.invalidate", nil, function(f)
+    local box = Instance.new("Folder")
+    local part = Instance.new("Part", box)
+    f(box:FindFirstChild("Part"))
+    return part ~= box:FindFirstChild("Part") or false, "the reference was not invalidated"
+end)
+test("cache.iscached", nil, function(f)
+    local part = Instance.new("Part")
+    if not f(part) then return false, "a new part should be cached" end
+    local inv = G("cache.invalidate")
+    if inv then inv(part); if f(part) then return false, "still cached after invalidate" end end
+    return true
+end)
+test("cache.replace", nil, function(f)
+    local part, fire = Instance.new("Part"), Instance.new("Fire")
+    f(part, fire)
+    return part ~= fire or false, "part was not replaced"
+end)
+
+-- ===================================================================
+--  DRAWING
+-- ===================================================================
+group("Drawing")
+test("Drawing", nil, function(d) return type(d) == "table" or false, "not a table" end)
+check("Drawing.new (all 7 types)", function()
+    local new = G("Drawing.new")
+    if not new then return "MISSING", "no Drawing.new" end
+    local bad = {}
+    for _, kind in ipairs({"Line", "Text", "Image", "Circle", "Square", "Quad", "Triangle"}) do
+        local ok = pcall(function()
+            local o = new(kind)
+            o.Visible = false
+            o:Remove()
+        end)
+        if not ok then table.insert(bad, kind) end
+    end
+    return #bad == 0 or false, "can't make: " .. table.concat(bad, ", ")
+end)
+test("Drawing.Fonts", nil, function(t) return (type(t) == "table" and t.UI ~= nil) or false, "no Fonts.UI" end)
+test("isrenderobj", nil, function(f)
+    local new = G("Drawing.new")
+    if not new then return true, "present (no Drawing.new to test with)" end
+    local sq = new("Square")
+    local ok = f(sq) == true and f({}) == false
+    pcall(function() sq:Remove() end)
+    return ok or false, "wrong answer"
+end)
+test("getrenderproperty", nil, function(f)
+    local new = G("Drawing.new")
+    if not new then return true, "present (no Drawing.new to test with)" end
+    local sq = new("Square")
+    sq.Visible = true
+    local ok = f(sq, "Visible") == true
+    pcall(function() sq:Remove() end)
+    return ok or false, "didn't read Visible"
+end)
+test("setrenderproperty", nil, function(f)
+    local new = G("Drawing.new")
+    if not new then return true, "present (no Drawing.new to test with)" end
+    local sq = new("Square")
+    f(sq, "Visible", false)
+    local ok = sq.Visible == false
+    pcall(function() sq:Remove() end)
+    return ok or false, "didn't set Visible"
+end)
+test("cleardrawcache", nil, "skip")
+
+-- ===================================================================
+--  NETWORK
+-- ===================================================================
+group("Network")
+test("request", {"http.request", "http_request", "syn.request"}, function(f)
+    local r = f({Url = "https://raw.githubusercontent.com/9okVR/VALOR_HUB/refs/heads/main/README.md", Method = "GET"})
+    return (type(r) == "table" and r.StatusCode == 200 and type(r.Body) == "string") or false,
+        "GET failed (status " .. tostring(r and r.StatusCode) .. ")"
+end, 8)
+test("WebSocket", nil, function(t) return (type(t) == "table" or type(t) == "userdata") or false, "not a library" end)
+test("WebSocket.connect", nil, "skip")
+
+-- ===================================================================
+--  ACTORS
+-- ===================================================================
+group("Actors")
+test("getactors", nil, function(f) return type(f()) == "table" or false, "not a table" end)
+test("run_on_actor", nil, "skip")
+test("create_comm_channel", nil, "skip")
+test("isparallel", nil, function(f) return f() == false or false, "this script isn't in parallel, should be false" end)
+
+-- ===================================================================
+--  INPUT
+-- ===================================================================
+group("Input")
+test("isrbxactive", {"isgameactive", "iswindowactive"}, function(f) return "returned " .. tostring(f()) end)
+for _, n in ipairs({"mouse1click", "mouse1press", "mouse1release", "mouse2click", "mouse2press", "mouse2release",
+        "mousemoveabs", "mousemoverel", "mousescroll", "keypress", "keyrelease"}) do
+    test(n, nil, "skip")
+end
+
+-- ===================================================================
+--  CONSOLE & MISC
+-- ===================================================================
+group("Console")
+test("rconsoleprint", {"consoleprint"}, "skip")
+test("rconsoleclear", {"consoleclear"}, "skip")
+test("rconsolecreate", {"consolecreate"}, "skip")
+test("rconsoledestroy", {"consoledestroy"}, "skip")
+test("rconsoleinput", {"consoleinput"}, "skip")
+test("rconsolesettitle", {"rconsolename", "consolesettitle"}, "skip")
+
+group("Miscellaneous")
+test("identifyexecutor", {"getexecutorname"}, function(f)
+    local name, version = f()
+    if type(name) ~= "string" then return false, "no name returned" end
+    return name .. (version and (" " .. tostring(version)) or "")
+end)
+test("setclipboard", {"toclipboard", "setrbxclipboard"}, "skip")
+test("queue_on_teleport", {"queueonteleport", "syn.queue_on_teleport"}, "skip")
+test("setfpscap", nil, "skip")
+test("messagebox", nil, "skip")
+
+-- ===================================================================
+--  extra checks (not functions)
+-- ===================================================================
+group("Game access", true)
+extra("require() game module", function()
+    local candidates = {}
+    local knit = RS:FindFirstChild("Packages") and RS.Packages:FindFirstChild("Knit")
+    if knit then table.insert(candidates, knit) end
+    for _, root in ipairs({RS, RF}) do
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("ModuleScript") then table.insert(candidates, d) end
+            if #candidates >= 6 then break end
+        end
+    end
+    if #candidates == 0 then return "INFO", "this game has no ModuleScripts to try" end
+    local lastErr
+    for _, m in ipairs(candidates) do
+        local ok, v = pcall(require, m)
+        if ok then return "PASS", "loaded " .. m:GetFullName() end
+        lastErr = tostring(v)
+    end
+    if lastErr and lastErr:find("[Ss]andboxed") then
+        return "FAIL", "your scripts run as SANDBOXED threads, so Roblox refuses the game's modules: " .. lastErr
+    end
+    return "FAIL", lastErr or "require failed"
+end, 8)
+extra("require() live game copy", function()
+    local knit = RS:FindFirstChild("Packages") and RS.Packages:FindFirstChild("Knit")
+    if not knit then return "INFO", "n/a in this game (tested in games built on Knit)" end
+    local ok, k = pcall(require, knit)
+    if not ok then return "FAIL", "can't require Knit: " .. tostring(k) end
+    local ok2, err = pcall(function() return k.GetController("GameController") end)
+    if ok2 then return "PASS", "Knit is the game's own, already started" end
+    if tostring(err):find("started") then
+        return "FAIL", "got a FRESH copy (" .. tostring(err) .. ") - scripts can't read the game's live state"
+    end
+    return "INFO", "Knit loads (this game has no GameController to compare)"
+end, 8)
+extra("VirtualInputManager", function()
+    local ok, v = pcall(game.GetService, game, "VirtualInputManager")
+    return (ok and v) and "PASS" or "FAIL", (ok and v) and "available (scripted key presses, clicks)" or "can't press keys / click"
+end)
+extra("VirtualUser", function()
+    local ok, v = pcall(game.GetService, game, "VirtualUser")
+    return (ok and v) and "PASS" or "FAIL", (ok and v) and "available (anti-AFK)" or "missing (anti-AFK)"
+end)
+extra("game:HttpGet", function()
+    local t0 = os.clock()
+    local ok, body = pcall(function()
+        return game:HttpGet("https://raw.githubusercontent.com/9okVR/VALOR_HUB/refs/heads/main/README.md")
+    end)
+    if not ok then return "FAIL", tostring(body) end
+    return "PASS", ("%d bytes in %d ms"):format(#body, (os.clock() - t0) * 1000)
+end, 10)
+extra("buffer library", function()
+    local b = buffer.create(8)
+    buffer.writef32(b, 0, 1.5)
+    return buffer.readf32(b, 0) == 1.5 and "PASS" or "FAIL", "reads binary data (games that pack network data)"
+end)
+
+group("Threads & safety", true)
+extra("Thread identity", function()
+    local get = G("getthreadidentity") or G("getidentity") or G("getthreadcontext")
+    if not get then return "INFO", "unknown (no getthreadidentity)" end
+    return "INFO", "level " .. tostring(get())
+end)
+extra("File calls keep UI access", function()
+    local rf, wf = G("readfile"), G("writefile")
+    if not (rf and wf) then return "INFO", "n/a (no file functions)" end
+    local label = Instance.new("TextLabel")
+    local result, done = nil, false
+    task.spawn(function()
+        pcall(wf, DIR .. "/probe.txt", "x")
+        pcall(rf, DIR .. "/probe.txt")
+        result = pcall(function() label.Text = "after a file call" end)
+        done = true
+    end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < 3 do task.wait() end
+    if result then return "PASS", "a thread that read a file can still edit the script's own UI" end
+    return "WARN", "after readfile/writefile the thread lost access to the script's own objects"
+end)
+extra("Blocks writes outside", function()
+    local wf = G("writefile")
+    if not wf then return "INFO", "n/a (no writefile)" end
+    if pcall(wf, "../valor_escape_check.txt", "x") then
+        pcall(function() G("delfile")("../valor_escape_check.txt") end)
+        return "WARN", "a script could write OUTSIDE the workspace folder (../) - block that"
+    end
+    return "PASS", "\"../\" paths are refused"
+end)
+extra("Blocks unsafe file types", function()
+    local wf = G("writefile")
+    if not wf then return "INFO", "n/a (no writefile)" end
+    local allowed = {}
+    for _, ext in ipairs({"exe", "bat", "cmd", "dll", "ps1", "vbs", "sh", "command", "dylib", "app"}) do
+        local name = DIR .. "/valor_check." .. ext
+        if pcall(wf, name, "x") then
+            table.insert(allowed, "." .. ext)
+            pcall(function() G("delfile")(name) end)
+        end
+    end
+    if #allowed > 0 then return "WARN", "a script could write runnable files: " .. table.concat(allowed, " ") end
+    return "PASS", "runnable file types are refused"
+end)
+extra("loadstring sees getgenv", function()
+    local genv = G("getgenv")
+    if not (genv and loadstring) then return "INFO", "n/a" end
+    genv().__valor_share = 42
+    local ok, v = pcall(function() return loadstring("return __valor_share")() end)
+    genv().__valor_share = nil
+    if ok and v == 42 then return "PASS", "code from loadstring sees getgenv() globals" end
+    return "FAIL", "code from loadstring can't see getgenv() globals (most loaders depend on this)"
+end)
+
+group("Speed", true)
+extra("Script speed", function()
+    local t0 = os.clock()
+    local x = 0
+    for i = 1, 1000000 do x = x + i % 7 end
+    local ms = (os.clock() - t0) * 1000
+    local s = ms < 60 and "PASS" or (ms < 200 and "WARN" or "FAIL")
+    return s, ("1M loop steps in %d ms%s"):format(ms, ms < 60 and " - normal" or " - slower than normal Roblox scripts")
+end, 15)
+extra("Frame time", function()
+    local t0 = os.clock()
+    for _ = 1, 10 do task.wait() end
+    local ms = (os.clock() - t0) * 100
+    return ms < 40 and "PASS" or "WARN", ("task.wait(): %.1f ms per frame"):format(ms)
+end)
+
+-- clean up the test folder
+pcall(function() local d = G("delfolder"); if d then d(DIR) end end)
+
+-- ===================================================================
+--  totals
+-- ===================================================================
+local fns = {total = 0, pass = 0}
+local ext = {total = 0, pass = 0}
+for _, g in ipairs(groups) do
+    g.pass, g.total = 0, 0
+    for _, it in ipairs(g.items) do
+        local good = it.status == "PASS" or it.status == "ALIAS" or it.status == "SKIP"
+        if it.status ~= "INFO" then
+            g.total = g.total + 1
+            if good then g.pass = g.pass + 1 end
+            local bucket = g.extra and ext or fns
+            bucket.total = bucket.total + 1
+            if good then bucket.pass = bucket.pass + 1 end
+        end
+    end
+end
+local byName = {}
+for _, g in ipairs(groups) do for _, it in ipairs(g.items) do byName[it.name] = it.status end end
+-- what most popular scripts rely on
+local CORE = {"loadstring", "game:HttpGet", "request", "getgenv", "getrenv", "hookfunction", "hookmetamethod",
+    "getnamecallmethod", "newcclosure", "checkcaller", "getrawmetatable", "setreadonly", "getconnections",
+    "firesignal", "firetouchinterest", "fireproximityprompt", "fireclickdetector", "Drawing.new (all 7 types)",
+    "writefile", "readfile", "isfile", "makefolder", "listfiles", "gethui", "cloneref", "getgc",
+    "setclipboard", "queue_on_teleport", "identifyexecutor", "getcustomasset", "require() game module",
+    "VirtualInputManager"}
+local core = {total = #CORE, pass = 0, missing = {}}
+for _, n in ipairs(CORE) do
+    local s = byName[n]
+    if s == "PASS" or s == "ALIAS" or s == "SKIP" or s == "INFO" then core.pass = core.pass + 1
+    else table.insert(core.missing, n) end
+end
+local execName = "unknown executor"
+pcall(function()
+    local f = G("identifyexecutor") or G("getexecutorname")
+    if f then local n, v = f(); execName = tostring(n) .. (v and (" " .. tostring(v)) or "") end
+end)
+local fnPct = fns.total > 0 and math.floor(fns.pass / fns.total * 100 + 0.5) or 0
+
+-- ===================================================================
+--  save the report (aligned columns)
+-- ===================================================================
+pcall(function()
+    local wf = G("writefile")
+    if not wf then return end
+    local out = {
+        "VALOR EXECUTOR CHECK - " .. execName .. " - " .. os.date("%Y-%m-%d %H:%M"),
+        ("Functions: %d / %d (%d%%)   Core: %d / %d   Extras: %d / %d"):format(fns.pass, fns.total, fnPct,
+            core.pass, core.total, ext.pass, ext.total),
+        #core.missing > 0 and ("Core missing: " .. table.concat(core.missing, ", ")) or "Core: everything most scripts need is there",
+        "",
+    }
+    for _, g in ipairs(groups) do
+        table.insert(out, ("== %s  (%d/%d)"):format(g.name:upper(), g.pass, g.total))
+        for _, it in ipairs(g.items) do
+            table.insert(out, ("  %-8s %-34s %s"):format(it.status, it.name, it.detail or ""))
+        end
+        table.insert(out, "")
+    end
+    wf("valor_check.txt", table.concat(out, "\n"))
+end)
+
+
+-- ===================================================================
+--  window
+-- ===================================================================
+local C = {
+    bg = Color3.fromRGB(13, 13, 17), card = Color3.fromRGB(19, 19, 24), cardHi = Color3.fromRGB(26, 26, 32),
+    line = Color3.fromRGB(48, 20, 26), accent = Color3.fromRGB(200, 16, 46),
+    text = Color3.fromRGB(242, 238, 240), dim = Color3.fromRGB(140, 132, 138), faint = Color3.fromRGB(96, 90, 96),
+    ok = Color3.fromRGB(80, 200, 120), warn = Color3.fromRGB(235, 170, 60), bad = Color3.fromRGB(232, 42, 74),
+    skip = Color3.fromRGB(120, 140, 200),
+}
+local STATUS_COLOR = {PASS = C.ok, ALIAS = C.ok, SKIP = C.skip, INFO = C.dim, WARN = C.warn, FAIL = C.bad, MISSING = C.bad}
+
+local function new(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    if parent then o.Parent = parent end
+    return o
+end
+local function corner(o, r) new("UICorner", {CornerRadius = UDim.new(0, r)}, o) end
+
+local host
+pcall(function() local h = G("gethui"); if h then host = h() end end)
+host = host or LP:WaitForChild("PlayerGui")
+pcall(function() local old = host:FindFirstChild("ValorCheck"); if old then old:Destroy() end end)
+
+local gui = new("ScreenGui", {Name = "ValorCheck", ResetOnSpawn = false, DisplayOrder = 2000,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling}, host)
+-- sized from the space the window really has (below Roblox's top bar)
+local area = gui.AbsoluteSize
+if area.X < 100 or area.Y < 100 then
+    local cam = workspace.CurrentCamera
+    area = (cam and cam.ViewportSize.X > 100) and cam.ViewportSize - Vector2.new(0, 58) or Vector2.new(1280, 660)
+end
+local W = math.min(660, area.X - 20)
+local H = math.min(500, area.Y - 20)
+local win = new("Frame", {Size = UDim2.new(0, W, 0, H), Position = UDim2.new(0.5, -W / 2, 0.5, -H / 2),
+    BackgroundColor3 = C.bg, BorderSizePixel = 0}, gui)
+corner(win, 8)
+new("UIStroke", {Color = C.accent, Transparency = 0.45, Thickness = 1}, win)
+
+-- header: title, executor, close
+local header = new("Frame", {Size = UDim2.new(1, 0, 0, 52), BackgroundTransparency = 1}, win)
+new("TextLabel", {Size = UDim2.new(1, -60, 0, 22), Position = UDim2.new(0, 18, 0, 10), BackgroundTransparency = 1,
+    RichText = true, Text = '<font color="rgb(200,16,46)"><b>VALOR</b></font>  <b>EXECUTOR CHECK</b>',
+    TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 17, TextXAlignment = Enum.TextXAlignment.Left}, header)
+new("TextLabel", {Size = UDim2.new(1, -60, 0, 14), Position = UDim2.new(0, 19, 0, 32), BackgroundTransparency = 1,
+    Text = string.upper(execName), TextColor3 = C.faint, Font = Enum.Font.GothamMedium, TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left}, header)
+local close = new("TextButton", {Size = UDim2.new(0, 28, 0, 28), Position = UDim2.new(1, -40, 0, 12),
+    BackgroundColor3 = C.card, BorderSizePixel = 0, Text = "X", TextColor3 = C.dim, Font = Enum.Font.GothamBold,
+    TextSize = 12, AutoButtonColor = true}, header)
+corner(close, 6)
+close.MouseButton1Click:Connect(function() gui:Destroy() end)
+
+-- drag by the header
+do
+    local dragging, start, startPos
+    header.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, start, startPos = i, i.Position, win.Position
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if not dragging then return end
+        if (i.UserInputType == Enum.UserInputType.MouseMovement and dragging.UserInputType == Enum.UserInputType.MouseButton1)
+            or i == dragging then
+            local d = i.Position - start
+            win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UIS.InputEnded:Connect(function(i)
+        if dragging and (i == dragging or (i.UserInputType == Enum.UserInputType.MouseButton1
+            and dragging.UserInputType == Enum.UserInputType.MouseButton1)) then dragging = nil end
+    end)
+end
+
+-- summary chips
+local chips = new("Frame", {Size = UDim2.new(1, -36, 0, 30), Position = UDim2.new(0, 18, 0, 56), BackgroundTransparency = 1}, win)
+new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8),
+    VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder}, chips)
+local function chip(text, color, order)
+    local c = new("TextLabel", {Size = UDim2.new(0, 0, 0, 26), AutomaticSize = Enum.AutomaticSize.X,
+        BackgroundColor3 = C.card, BorderSizePixel = 0, Text = text, TextColor3 = color, Font = Enum.Font.GothamBold,
+        TextSize = 12, LayoutOrder = order}, chips)
+    corner(c, 6)
+    new("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10)}, c)
+    new("UIStroke", {Color = C.line, Transparency = 0.2}, c)
+    return c
+end
+chip(("FUNCTIONS  %d / %d  ·  %d%%"):format(fns.pass, fns.total, fnPct), fnPct >= 90 and C.ok or (fnPct >= 70 and C.warn or C.bad), 1)
+chip(("CORE  %d / %d"):format(core.pass, core.total), core.pass == core.total and C.ok or (core.pass >= core.total - 3 and C.warn or C.bad), 2)
+chip(("EXTRAS  %d / %d"):format(ext.pass, ext.total), ext.pass == ext.total and C.ok or C.warn, 3)
+
+-- "problems only" switch
+local onlyProblems = false
+local filterBtn = new("TextButton", {Size = UDim2.new(0, 118, 0, 26), Position = UDim2.new(1, -136, 0, 58),
+    BackgroundColor3 = C.card, BorderSizePixel = 0, Text = "Problems only", TextColor3 = C.dim,
+    Font = Enum.Font.GothamMedium, TextSize = 12, AutoButtonColor = true}, win)
+corner(filterBtn, 6)
+new("UIStroke", {Color = C.line, Transparency = 0.2}, filterBtn)
+
+-- a hint under the chips when not ready
+local hintY = 92
+if #core.missing > 0 then
+    new("TextLabel", {Size = UDim2.new(1, -36, 0, 16), Position = UDim2.new(0, 18, 0, 90), BackgroundTransparency = 1,
+        Text = "Core functions missing or broken: " .. table.concat(core.missing, ", "), TextColor3 = C.bad,
+        Font = Enum.Font.GothamMedium, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd}, win)
+    hintY = 110
+end
+
+-- column titles
+local cols = new("Frame", {Size = UDim2.new(1, -36, 0, 18), Position = UDim2.new(0, 18, 0, hintY), BackgroundTransparency = 1}, win)
+local NAME_X, DETAIL_X = 74, 290
+local function colTitle(text, x, w)
+    new("TextLabel", {Size = UDim2.new(0, w, 1, 0), Position = UDim2.new(0, x, 0, 0), BackgroundTransparency = 1,
+        Text = text, TextColor3 = C.faint, Font = Enum.Font.GothamBold, TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left}, cols)
+end
+colTitle("STATUS", 8, 60)
+colTitle("FUNCTION / CHECK", NAME_X, 200)
+colTitle("RESULT  (click a row to read it all)", DETAIL_X, 300)
+new("Frame", {Size = UDim2.new(1, -36, 0, 1), Position = UDim2.new(0, 18, 0, hintY + 20), BackgroundColor3 = C.line,
+    BorderSizePixel = 0}, win)
+
+-- the list
+local listTop = hintY + 24
+local list = new("ScrollingFrame", {Size = UDim2.new(1, -24, 1, -(listTop + 30)), Position = UDim2.new(0, 18, 0, listTop),
+    BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = C.accent,
+    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y}, win)
+new("UIListLayout", {Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder}, list)
+new("UIPadding", {PaddingRight = UDim.new(0, 10), PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 8)}, list)
+
+local rows = {}
+local order = 0
+for _, g in ipairs(groups) do
+    order = order + 1
+    local head = new("Frame", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = order}, list)
+    new("TextLabel", {Size = UDim2.new(1, -80, 1, 0), Position = UDim2.new(0, 8, 0, 0), BackgroundTransparency = 1,
+        Text = string.upper(g.name) .. (g.extra and "   ·   EXTRA" or ""), TextColor3 = C.dim, Font = Enum.Font.GothamBold,
+        TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Bottom}, head)
+    new("TextLabel", {Size = UDim2.new(0, 70, 1, 0), Position = UDim2.new(1, -72, 0, 0), BackgroundTransparency = 1,
+        Text = g.total > 0 and (g.pass .. " / " .. g.total) or "", TextColor3 = g.pass == g.total and C.ok or C.warn,
+        Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Right,
+        TextYAlignment = Enum.TextYAlignment.Bottom}, head)
+    table.insert(rows, {frame = head, header = true, group = g})
+    for _, it in ipairs(g.items) do
+        order = order + 1
+        local row = new("TextButton", {Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = C.card, BackgroundTransparency = 1,
+            BorderSizePixel = 0, Text = "", AutoButtonColor = false, LayoutOrder = order}, list)
+        corner(row, 4)
+        local tag = new("TextLabel", {Size = UDim2.new(0, 58, 0, 18), Position = UDim2.new(0, 6, 0, 3),
+            BackgroundColor3 = STATUS_COLOR[it.status] or C.dim, BackgroundTransparency = 0.82, BorderSizePixel = 0,
+            Text = it.status, TextColor3 = STATUS_COLOR[it.status] or C.dim, Font = Enum.Font.GothamBold, TextSize = 10}, row)
+        corner(tag, 4)
+        new("TextLabel", {Size = UDim2.new(0, DETAIL_X - NAME_X - 10, 0, 24), Position = UDim2.new(0, NAME_X, 0, 0),
+            BackgroundTransparency = 1, Text = it.name, TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 13,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd}, row)
+        local detail = new("TextLabel", {Size = UDim2.new(1, -(DETAIL_X + 6), 0, 24), Position = UDim2.new(0, DETAIL_X, 0, 0),
+            BackgroundTransparency = 1, Text = it.detail or "", TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Center,
+            TextTruncate = Enum.TextTruncate.AtEnd}, row)
+        local open = false
+        row.MouseEnter:Connect(function() row.BackgroundTransparency = 0.4 end)
+        row.MouseLeave:Connect(function() row.BackgroundTransparency = open and 0.4 or 1 end)
+        row.MouseButton1Click:Connect(function()
+            open = not open
+            detail.TextWrapped = open
+            detail.TextTruncate = open and Enum.TextTruncate.None or Enum.TextTruncate.AtEnd
+            detail.TextYAlignment = open and Enum.TextYAlignment.Top or Enum.TextYAlignment.Center
+            detail.AutomaticSize = open and Enum.AutomaticSize.Y or Enum.AutomaticSize.None
+            detail.Size = UDim2.new(1, -(DETAIL_X + 6), 0, open and 0 or 24)
+            if open then new("UIPadding", {Name = "Pad", PaddingTop = UDim.new(0, 5), PaddingBottom = UDim.new(0, 5)}, detail)
+            else local p = detail:FindFirstChild("Pad"); if p then p:Destroy() end end
+            row.AutomaticSize = open and Enum.AutomaticSize.Y or Enum.AutomaticSize.None
+            row.Size = UDim2.new(1, 0, 0, 24)
+            row.BackgroundTransparency = open and 0.4 or 1
+        end)
+        table.insert(rows, {frame = row, item = it, group = g})
+    end
+end
+
+local function applyFilter()
+    for _, r in ipairs(rows) do
+        if r.header then
+            local any = false
+            for _, it in ipairs(r.group.items) do
+                if not onlyProblems or (it.status ~= "PASS" and it.status ~= "ALIAS" and it.status ~= "SKIP" and it.status ~= "INFO") then any = true end
+            end
+            r.frame.Visible = any
+        else
+            local s = r.item.status
+            r.frame.Visible = not onlyProblems or (s ~= "PASS" and s ~= "ALIAS" and s ~= "SKIP" and s ~= "INFO")
+        end
+    end
+    filterBtn.Text = onlyProblems and "Show all" or "Problems only"
+    filterBtn.TextColor3 = onlyProblems and C.text or C.dim
+end
+filterBtn.MouseButton1Click:Connect(function() onlyProblems = not onlyProblems; applyFilter() end)
+
+-- footer
+new("TextLabel", {Size = UDim2.new(1, -36, 0, 20), Position = UDim2.new(0, 18, 1, -26), BackgroundTransparency = 1,
+    Text = "PASS works  ·  ALIAS works under another name  ·  SKIP present, not run on purpose  ·  saved to valor_check.txt",
+    TextColor3 = C.faint, Font = Enum.Font.Gotham, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd}, win)
