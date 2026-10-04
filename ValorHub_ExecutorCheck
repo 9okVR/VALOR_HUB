@@ -5,10 +5,12 @@
     the newer sUNC-style ones, and common extras like firetouchinterest).
     Then extra checks: game modules, thread rules, file safety, speed.
 
-    Run it inside a game (one built on Knit, like Volleyball Legends, tests
-    the most). Results: a window (click a row to read its full message;
-    "Problems only" hides what passed) and valor_check.txt in the workspace.
-    Nothing is printed: some games upload their console.
+    Runs in ANY game - it's universal. Every check works everywhere except
+    one ("require() live game copy"), which can only be measured in games
+    built on Knit (Volleyball Legends, many simulators); elsewhere it shows
+    INFO and doesn't count. Results: a window (click a row to read its full
+    message; "Problems only" hides what passed) and valor_check.txt in the
+    workspace.
 
     Safe to run: it never clicks, types, changes your clipboard, FPS cap or
     teleport queue, never opens a console or message box, never hooks the
@@ -770,7 +772,7 @@ extra("require() game module", function()
 end, 8)
 extra("require() live game copy", function()
     local knit = RS:FindFirstChild("Packages") and RS.Packages:FindFirstChild("Knit")
-    if not knit then return "INFO", "n/a in this game (tested in games built on Knit)" end
+    if not knit then return "INFO", "only measurable in games built on Knit - doesn't count here; everything else ran normally" end
     local ok, k = pcall(require, knit)
     if not ok then return "FAIL", "can't require Knit: " .. tostring(k) end
     local ok2, err = pcall(function() return k.GetController("GameController") end)
