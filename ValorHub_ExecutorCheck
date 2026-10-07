@@ -921,9 +921,9 @@ local fnPct = fns.total > 0 and math.floor(fns.pass / fns.total * 100 + 0.5) or 
 -- ===================================================================
 --  save the report (aligned columns)
 -- ===================================================================
+-- (the same text goes to the file and to the "Copy results" button)
+local reportText = ""
 pcall(function()
-    local wf = G("writefile")
-    if not wf then return end
     local out = {
         "VALOR EXECUTOR CHECK - " .. execName .. " - " .. os.date("%Y-%m-%d %H:%M"),
         ("Functions: %d / %d (%d%%)   Core: %d / %d   Extras: %d / %d"):format(fns.pass, fns.total, fnPct,
@@ -938,7 +938,11 @@ pcall(function()
         end
         table.insert(out, "")
     end
-    wf("valor_check.txt", table.concat(out, "\n"))
+    reportText = table.concat(out, "\n")
+end)
+pcall(function()
+    local wf = G("writefile")
+    if wf then wf("valor_check.txt", reportText) end
 end)
 
 
@@ -1037,6 +1041,23 @@ chip(("EXTRAS  %d / %d"):format(ext.pass, ext.total), ext.pass == ext.total and 
 
 -- "problems only" switch
 local onlyProblems = false
+-- "Copy results": the whole report to the clipboard (only when clicked)
+local copyBtn = new("TextButton", {Size = UDim2.new(0, 108, 0, 26), Position = UDim2.new(1, -252, 0, 58),
+    BackgroundColor3 = C.card, BorderSizePixel = 0, Text = "Copy results", TextColor3 = C.dim,
+    Font = Enum.Font.GothamMedium, TextSize = 12, AutoButtonColor = true}, win)
+corner(copyBtn, 6)
+new("UIStroke", {Color = C.line, Transparency = 0.2}, copyBtn)
+copyBtn.MouseButton1Click:Connect(function()
+    local clip = G("setclipboard") or G("toclipboard") or G("setrbxclipboard")
+    local ok = clip and pcall(clip, reportText)
+    copyBtn.Text = ok and "Copied!" or "No clipboard"
+    copyBtn.TextColor3 = ok and C.ok or C.bad
+    task.delay(2, function()
+        copyBtn.Text = "Copy results"
+        copyBtn.TextColor3 = C.dim
+    end)
+end)
+
 local filterBtn = new("TextButton", {Size = UDim2.new(0, 118, 0, 26), Position = UDim2.new(1, -136, 0, 58),
     BackgroundColor3 = C.card, BorderSizePixel = 0, Text = "Problems only", TextColor3 = C.dim,
     Font = Enum.Font.GothamMedium, TextSize = 12, AutoButtonColor = true}, win)
