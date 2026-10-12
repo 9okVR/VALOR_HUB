@@ -9,3 +9,5 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/9okVR/VALOR_HUB/refs/
 A key is required. Get one in the Discord: https://discord.gg/GSAHydBefQ
 
 Supported: Volleyball Legends · Blox Fruits · Fisch · Grow a Garden · Murder Mystery 2 · RIVALS · Bedwars · Keyboard Escape · (Universal fallback for anything else)
+
+Usage stats: the loader reports your Roblox username, the game and server you are in, your executor and device, so we can see what is used and catch game updates or kick waves fast. Nothing else is collected.
