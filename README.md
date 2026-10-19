@@ -6,7 +6,7 @@ Multi-game script hub. One loader detects the game and runs the right panel.
 loadstring(game:HttpGet("https://raw.githubusercontent.com/9okVR/VALOR_HUB/refs/heads/main/ValorHub_Loader"))()
 ```
 
-A key is required. Get one in the Discord: https://discord.gg/GSAHydBefQ
+Free for your first 24 hours (one time per account). After that, a free key from the Discord: https://discord.gg/GSAHydBefQ
 
 Supported: Volleyball Legends · Blox Fruits · Fisch · Grow a Garden · Murder Mystery 2 · RIVALS · Bedwars · Keyboard Escape · Steal An Egg · Huss Valley · DOORS · (Universal fallback for anything else)
 
